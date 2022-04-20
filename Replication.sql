@@ -5,3 +5,8 @@ SELECT client_addr AS client, usename AS "user", application_name AS name, state
 (pg_wal_lsn_diff(flush_lsn,replay_lsn) / 1024)::int as replay,
 (pg_wal_lsn_diff(pg_current_wal_lsn(),replay_lsn))::int / 1024 as total_lag
 FROM pg_stat_replication;
+
+
+select name, setting, setting::int * 16 || 'MB' AS setting_in_mb
+from pg_settings
+where name in ('min_wal_size', 'max_wal_size');

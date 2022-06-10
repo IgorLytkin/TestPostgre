@@ -18,14 +18,18 @@ SHOW server_version;
 SELECT type, database, user_name, auth_method FROM pg_hba_file_rules();
 
 CREATE DATABASE db1;
+\c db1;
 CREATE TABLE t(
     id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     s text
 );
 INSERT INTO t(s) VALUES ('Привет, мир!'), (''), (NULL);
+
 COPY t TO stdout;
 COPY t TO stdout WITH (NULL '<NULL>', DELIMITER ',');
 COPY (SELECT * FROM t WHERE s IS NOT NULL) TO stdout;
 COPY t TO stdout WITH (FORMAT CSV);
 TRUNCATE TABLE t;
  \pset null '\\N'
+
+

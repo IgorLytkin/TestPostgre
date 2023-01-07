@@ -885,3 +885,437 @@ ROLLBACK;
 BEGIN;
 DELETE FROM t RETURNING *;
 ROLLBACK;
+
+-- Динамический SQL
+DO $$
+DECLARE
+    cmd CONSTANT text := 'CREATE TABLE city_msk(
+        name text, architect text, founded integer
+    )';
+BEGIN
+    EXECUTE cmd; -- таблица для исторических зданий Москвы
+END;
+$$;
+DO $$
+DECLARE
+    rec record;
+    cnt bigint;
+BEGIN
+    EXECUTE 'INSERT INTO city_msk (name, architect, founded) VALUES
+                 (''Пашков дом'', ''Василий Баженов'', 1784),
+                 (''Музей Пушкина'', ''Роман Клейн'', 1898),
+                 (''ЦУМ'', ''Роман Клейн'', 1908)
+             RETURNING name, architect, founded'
+    INTO rec;
+    RAISE NOTICE '%', rec;
+    GET DIAGNOSTICS cnt = ROW_COUNT;
+    RAISE NOTICE 'Добавлено строк: %', cnt;
+END;
+$$;
+DO $$
+DECLARE
+    rec record;
+BEGIN
+    FOR rec IN EXECUTE 'SELECT * FROM city_msk ORDER BY founded'
+    LOOP
+        RAISE NOTICE '%', rec;
+    END LOOP;
+END;
+$$;
+DO $$
+DECLARE
+    cur refcursor;
+    rec record;
+BEGIN
+    OPEN cur FOR EXECUTE 'SELECT * FROM city_msk ORDER BY founded';
+    LOOP
+        FETCH cur INTO rec;
+        EXIT WHEN NOT FOUND;
+        RAISE NOTICE '%', rec;
+    END LOOP;
+END;
+$$;
+CREATE FUNCTION sel_msk(architect text, founded integer DEFAULT NULL)
+RETURNS SETOF text
+AS $$
+DECLARE
+    -- параметры пронумерованы: $1, $2...
+    cmd text := '
+        SELECT name FROM city_msk
+        WHERE architect = $1 AND ($2 IS NULL OR founded = $2)';
+BEGIN
+    RETURN QUERY
+        EXECUTE cmd
+        USING architect, founded; -- указываем значения по порядку
+END;
+$$ LANGUAGE plpgsql;
+SELECT * FROM sel_msk('Роман Клейн');
+SELECT * FROM sel_msk('Роман Клейн', 1908);
+
+CREATE FUNCTION sel_city(
+    city_code text,
+    architect text,
+    founded integer DEFAULT NULL
+)
+RETURNS SETOF text AS $$
+DECLARE
+    cmd text := '
+        SELECT name FROM city_' || city_code || '
+        WHERE architect = $1 AND ($2 IS NULL OR founded = $2)';
+BEGIN
+    RAISE NOTICE '%', cmd;
+    RETURN QUERY
+        EXECUTE cmd
+        USING architect, founded;
+END;
+$$ LANGUAGE plpgsql;
+SELECT * FROM sel_city('msk', 'Василий Баженов');
+SELECT * FROM sel_city('msk WHERE false
+        UNION ALL
+        SELECT usename FROM pg_user
+        UNION ALL
+        SELECT name FROM city_msk', '');
+
+SELECT format('%I', 'foo'),
+          format('%I', 'foo bar'),
+          format('%I', 'foo"bar');
+SELECT quote_ident('foo'),
+          quote_ident('foo bar'),
+          quote_ident('foo"bar');
+DO $$
+DECLARE
+    cmd CONSTANT text := 'CREATE TABLE %I(
+        name text, architect text, founded integer
+    )';
+BEGIN
+    EXECUTE format(cmd, 'city_spb'); -- таблица для Санкт-Петербурга
+    EXECUTE format(cmd, 'city_nov'); -- таблица для Новгорода
+END;
+$$;
+SELECT format('%L', 'foo bar'),
+          format('%L', 'foo''bar'),
+          format('%L', NULL);
+SELECT quote_nullable('foo bar'),
+          quote_nullable('foo''bar'),
+          quote_nullable(NULL);
+SELECT quote_literal(NULL);
+CREATE OR REPLACE FUNCTION sel_city(
+    city_code text,
+    architect text,
+    founded integer DEFAULT NULL
+)
+RETURNS SETOF text
+AS $$
+DECLARE
+    cmd text := '
+        SELECT name FROM %I
+        WHERE architect = %L AND (%L IS NULL OR founded = %L::integer)';
+BEGIN
+    RETURN QUERY EXECUTE format(
+        cmd, 'city_'||city_code, architect, founded, founded
+    );
+END;
+$$ LANGUAGE plpgsql;
+SELECT * FROM sel_city('msk', 'Василий Баженов', 1784);
+SELECT * FROM sel_city('msk WHERE false
+        UNION ALL
+        SELECT usename FROM pg_user
+        UNION ALL
+        SELECT name FROM city_msk', '');
+
+CREATE OR REPLACE FUNCTION get_catalog(
+    author_name text,
+    book_title text,
+    in_stock boolean
+)
+RETURNS TABLE(book_id integer, display_name text, onhand_qty integer)
+AS $$
+DECLARE
+    title_cond text := '';
+    author_cond text := '';
+    qty_cond text := '';
+BEGIN
+    IF book_title != '' THEN
+        title_cond := format(
+            ' AND cv.title ILIKE %L', '%'||book_title||'%'
+        );
+    END IF;
+    IF author_name != '' THEN
+        author_cond := format(
+            ' AND cv.authors ILIKE %L', '%'||author_name||'%'
+        );
+    END IF;
+    IF in_stock THEN
+        qty_cond := ' AND cv.onhand_qty > 0';
+    END IF;
+    RETURN QUERY EXECUTE '
+        SELECT cv.book_id,
+               cv.display_name,
+               cv.onhand_qty
+        FROM   catalog_v cv
+        WHERE  true'
+        || title_cond || author_cond || qty_cond || '
+        ORDER BY display_name';
+END;
+$$ STABLE LANGUAGE plpgsql;
+
+CREATE DATABASE plpgsql_dynamic;
+\c plpgsql_dynamic
+
+CREATE FUNCTION form_query() RETURNS text
+AS $$
+DECLARE
+    query_text text;
+    columns text := '';
+    r record;
+BEGIN
+    -- Статическая часть запроса
+    -- Первые два столбца: имя схемы и общее количество функций в ней
+    query_text :=
+$query$
+SELECT pronamespace::regnamespace::text AS schema
+     , count(*) AS total{{columns}}
+FROM pg_proc
+GROUP BY pronamespace::regnamespace
+ORDER BY schema
+$query$;
+
+    -- Динамическая часть запроса
+    -- Получаем список владельцев функций, для каждого - отдельный столбец
+    FOR r IN SELECT DISTINCT proowner AS owner FROM pg_proc ORDER BY 1
+    LOOP
+        columns := columns || format(
+            E'\n     , sum(CASE WHEN proowner = %s THEN 1 ELSE 0 END) AS %I',
+            r.owner,
+            r.owner::regrole
+        );
+    END LOOP;
+
+    RETURN replace(query_text, '{{columns}}', columns);
+END;
+$$ STABLE LANGUAGE plpgsql;
+SELECT form_query();
+CREATE FUNCTION matrix() RETURNS SETOF record
+AS $$
+BEGIN
+    RETURN QUERY EXECUTE form_query();
+END;
+$$ STABLE LANGUAGE plpgsql;
+SELECT * FROM matrix();
+
+CREATE FUNCTION matrix_call() RETURNS text
+AS $$
+DECLARE
+    cmd text;
+    r record;
+BEGIN
+    cmd := 'SELECT * FROM matrix() AS m(
+        schema text, total bigint';
+
+    FOR r IN SELECT DISTINCT proowner AS owner FROM pg_proc ORDER BY 1
+    LOOP
+        cmd := cmd || format(', %I bigint', r.owner::regrole::text);
+    END LOOP;
+    cmd := cmd || E'\n)';
+
+    RAISE NOTICE '%', cmd;
+    RETURN cmd;
+END;
+$$ STABLE LANGUAGE plpgsql;
+BEGIN ISOLATION LEVEL REPEATABLE READ;
+SELECT matrix_call() \gexec
+
+-- Массивы
+DO $$
+DECLARE
+    a integer[2]; -- размер игнорируется
+BEGIN
+    a := ARRAY[10,20,30];
+    RAISE NOTICE '%', a;
+    -- по умолчанию элементы нумеруются с единицы
+    RAISE NOTICE 'a[1] = %, a[2] = %, a[3] = %', a[1], a[2], a[3];
+    -- срез массива
+    RAISE NOTICE 'Срез [2:3] = %', a[2:3];
+END;
+$$ LANGUAGE plpgsql;
+DO $$
+DECLARE
+    a integer[];
+BEGIN
+    a[2] := 10;
+    a[3] := 20;
+    a[6] := 30;
+    RAISE NOTICE '%', a;
+END;
+$$ LANGUAGE plpgsql;
+DO $$
+DECLARE
+    a integer[];
+BEGIN
+    a := ARRAY( SELECT n FROM generate_series(1,3) n );
+    RAISE NOTICE '%', a;
+END;
+$$ LANGUAGE plpgsql;
+SELECT unnest( ARRAY[1,2,3] );
+
+EXPLAIN (costs off)
+SELECT * FROM generate_series(1,10) g(id) WHERE id IN (1,2,3);
+
+DO $$
+DECLARE
+    a integer[][] := '{
+        { 10, 20, 30},
+        {100,200,300}
+    }';
+BEGIN
+    RAISE NOTICE '%', a;
+    RAISE NOTICE 'Срез [1:2][2:3] = %', a[1:2][2:3];
+    -- расширять нельзя
+    a[4][4] := 1;
+END;
+$$ LANGUAGE plpgsql;
+
+rollback;
+
+DO $$
+DECLARE
+    a integer[] := ARRAY[10,20,30];
+BEGIN
+    FOR i IN array_lower(a,1)..array_upper(a,1) LOOP
+        RAISE NOTICE 'a[%] = %', i, a[i];
+    END LOOP;
+END;
+$$ LANGUAGE plpgsql;
+
+DO $$
+DECLARE
+    a integer[] := ARRAY[10,20,30];
+    x integer;
+BEGIN
+    FOREACH x IN ARRAY a LOOP
+        RAISE NOTICE '%', x;
+    END LOOP;
+END;
+$$ LANGUAGE plpgsql;
+DO $$
+DECLARE
+    -- можно и без двойных квадратных скобок
+    a integer[] := ARRAY[
+        ARRAY[ 10, 20, 30],
+        ARRAY[100,200,300]
+    ];
+BEGIN
+    FOR i IN array_lower(a,1)..array_upper(a,1) LOOP -- по строкам
+        FOR j IN array_lower(a,2)..array_upper(a,2) LOOP -- по столбцам
+            RAISE NOTICE 'a[%][%] = %', i, j, a[i][j];
+        END LOOP;
+    END LOOP;
+END;
+$$ LANGUAGE plpgsql;
+DO $$
+DECLARE
+    a integer[] := ARRAY[
+        ARRAY[ 10, 20, 30],
+        ARRAY[100,200,300]
+    ];
+    x integer;
+BEGIN
+    FOREACH x IN ARRAY a LOOP
+        RAISE NOTICE '%', x;
+    END LOOP;
+END;
+$$ LANGUAGE plpgsql;
+CREATE FUNCTION maximum(VARIADIC a integer[]) RETURNS integer
+AS $$
+DECLARE
+    x integer;
+    maxsofar integer;
+BEGIN
+    FOREACH x IN ARRAY a LOOP
+        IF x IS NOT NULL AND (maxsofar IS NULL OR x > maxsofar) THEN
+            maxsofar := x;
+        END IF;
+    END LOOP;
+    RETURN maxsofar;
+END;
+$$ IMMUTABLE LANGUAGE plpgsql;
+SELECT maximum(12, 65, 47);
+SELECT maximum(12, 65, 47, null, 87, 24);
+SELECT maximum(null, null);
+
+DROP FUNCTION maximum(integer[]);
+CREATE FUNCTION maximum(VARIADIC a anyarray, maxsofar OUT anyelement)
+AS $$
+DECLARE
+    x maxsofar%TYPE;
+BEGIN
+    FOREACH x IN ARRAY a LOOP
+        IF x IS NOT NULL AND (maxsofar IS NULL OR x > maxsofar) THEN
+            maxsofar := x;
+        END IF;
+    END LOOP;
+END;
+$$ IMMUTABLE LANGUAGE plpgsql;
+SELECT maximum(12, 65, 47);
+SELECT maximum(12.1, 65.3, 47.6);
+
+CREATE TABLE posts(
+    post_id integer PRIMARY KEY,
+    message text
+);
+CREATE TABLE tags(
+    tag_id integer PRIMARY KEY,
+    name text
+);
+
+-- Задания от Егора https://t.me/miruzzy
+ DO $$
+                 DECLARE
+                     a integer[] := ARRAY[10,20,30];
+                     iter RECORD;
+                 BEGIN
+                     FOR iter IN select ROW_NUMBER() over () as row, val from unnest(a) as val LOOP
+                         RAISE NOTICE 'a[%] = %', iter.row, iter.val;
+                     END LOOP;
+                 END;
+                 $$ LANGUAGE plpgsql;
+
+drop table tablea;
+create table tablea ( id int, user_id int, o_num int, price int);
+insert into tablea(id, user_id, o_num, price) VALUES (1,1,1,100000);
+insert into tablea(id, user_id, o_num, price) VALUES (2,2,1,80000);
+insert into tablea(id, user_id, o_num, price) VALUES (3,3,2,150000);
+insert into tablea(id, user_id, o_num, price) VALUES (4,4,2,10000);
+
+drop table personal;
+create table personal(user_id int,surname text);
+insert into personal(user_id,surname)values (1, 'Иванов');
+insert into personal(user_id,surname)values (2, 'Петров');
+insert into personal(user_id,surname)values (3, 'Лыткин');
+insert into personal(user_id,surname)values (4, 'Сидоров');
+
+-- tablea+personal
+select t.o_num Отдел,row_number() over (PARTITION BY o_num ORDER BY price desc) Позиция, p.surname Фамилия, t.price Компенсация
+from tablea t inner join personal p on t.user_id = p.user_id
+order by t.o_num, t.price desc;
+
+select row_number() over(), user_id, price
+from tablea
+where o_num = 1
+order by price desc;
+
+drop table tab;
+create table tab ( data text );
+insert into tab(data) values ('аваа');
+insert into tab(data) values ('ааав');
+insert into tab(data) values ('ва');
+insert into tab(data) values ('саа');
+insert into tab(data) values ('сав');
+insert into tab(data) values ('аа');
+
+select substr(t.data,1,1) Буква,
+       count(*) over (PARTITION BY substr(t.data,1,1)) Всего,
+       row_number() over (PARTITION BY substr(t.data,1,1) ORDER BY substr(t.data,1,1)) Номер,
+       t.data
+from tab t
+order by 1,3 ;

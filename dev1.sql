@@ -2642,3 +2642,323 @@ SELECT * FROM orders ORDER BY id;
 TRUNCATE lines;
 SELECT * FROM orders ORDER BY id;
 
+-- 18. Отладка
+CREATE FUNCTION entrance(
+    floors integer,
+    flats_per_floor integer,
+    flat_no integer
+)
+RETURNS integer
+AS $$
+BEGIN
+    RETURN floor((flat_no - 1)::real / (floors * flats_per_floor)) + 1;
+END;
+$$ LANGUAGE plpgsql IMMUTABLE;
+ SELECT entrance(9, 4, 1), entrance(9, 4, 36), entrance(9, 4, 37);
+SELECT entrance(9, 4, 0);
+
+CREATE OR REPLACE FUNCTION entrance(
+    floors integer,
+    flats_per_floor integer,
+    flat_no integer
+)
+RETURNS integer
+AS $$
+BEGIN
+    ASSERT floors > 0 AND flats_per_floor > 0 AND flat_no > 0,
+        'Некорректные входные параметры';
+    RETURN floor((flat_no - 1)::real / (floors * flats_per_floor)) + 1;
+END;
+$$ LANGUAGE plpgsql IMMUTABLE;
+SELECT entrance(9, 4, 0);
+
+CREATE FUNCTION get_count(tabname text) RETURNS bigint
+AS $$
+DECLARE
+    cmd text;
+    retval bigint;
+BEGIN
+    cmd := 'SELECT COUNT(*) FROM ' || quote_ident(tabname);
+    RAISE NOTICE 'cmd: %', cmd;
+    EXECUTE cmd INTO retval;
+    RETURN retval;
+END;
+$$ LANGUAGE plpgsql STABLE;
+SELECT get_count('pg_class');
+
+CREATE PROCEDURE long_running()
+AS $$
+BEGIN
+    RAISE NOTICE 'long_running. Stage 1/3...';
+    PERFORM pg_sleep(2);
+
+    RAISE NOTICE 'long_running. Stage 2/3...';
+    PERFORM pg_sleep(3);
+
+    RAISE NOTICE 'long_running. Stage 3/3...';
+    PERFORM pg_sleep(1);
+
+    RAISE NOTICE 'long_running. Done.';
+END;
+$$ LANGUAGE plpgsql;
+CALL long_running();
+
+CREATE OR REPLACE PROCEDURE raise_msg(msg text)
+AS $$
+BEGIN
+    CASE current_setting('app.raise_level', true)
+        WHEN 'NOTICE'  THEN RAISE NOTICE  '%, %, %', user, clock_timestamp(), msg;
+        WHEN 'DEBUG'   THEN RAISE DEBUG   '%, %, %', user, clock_timestamp(), msg;
+        WHEN 'LOG'     THEN RAISE LOG     '%, %, %', user, clock_timestamp(), msg;
+        WHEN 'INFO'    THEN RAISE INFO    '%, %, %', user, clock_timestamp(), msg;
+        WHEN 'WARNING' THEN RAISE WARNING '%, %, %', user, clock_timestamp(), msg;
+        ELSE NULL; -- все прочие значения отключают вывод сообщений
+    END CASE;
+END;
+$$ LANGUAGE plpgsql;
+SET app.raise_level TO 'NONE';
+CREATE OR REPLACE PROCEDURE long_running()
+AS $$
+BEGIN
+    CALL raise_msg('long_running. Stage 1/3...');
+    PERFORM pg_sleep(2);
+
+    CALL raise_msg('long_running. Stage 2/3...');
+    PERFORM pg_sleep(3);
+
+    CALL raise_msg('long_running. Stage 3/3...');
+    PERFORM pg_sleep(1);
+
+    CALL raise_msg('long_running. Done.');
+END;
+$$ LANGUAGE plpgsql;
+CALL long_running();
+
+SET app.raise_level TO 'NOTICE';
+CALL long_running();
+
+SET app.raise_level TO 'LOG';
+CALL long_running();
+
+CREATE OR REPLACE PROCEDURE long_running()
+AS $$
+BEGIN
+    SET LOCAL application_name TO "long_running. Stage 1/3...";
+    PERFORM pg_sleep(2);
+
+    SET LOCAL application_name TO "long_running. Stage 2/3...";
+    PERFORM pg_sleep(3);
+
+    SET LOCAL application_name TO "long_running. Stage 3/3...";
+    PERFORM pg_sleep(1);
+
+    SET LOCAL application_name TO "long_running. Done.";
+END;
+$$ LANGUAGE plpgsql;
+CREATE OR REPLACE PROCEDURE long_running()
+AS $$
+BEGIN
+    SET LOCAL application_name TO "long_running. Stage 1/3...";
+    PERFORM pg_sleep(2);
+
+    SET LOCAL application_name TO "long_running. Stage 2/3...";
+    PERFORM pg_sleep(3);
+
+    SET LOCAL application_name TO "long_running. Stage 3/3...";
+    PERFORM pg_sleep(1);
+
+    SET LOCAL application_name TO "long_running. Done.";
+END;
+$$ LANGUAGE plpgsql;
+CALL long_running();
+
+SELECT pid, usename, application_name
+FROM pg_stat_activity
+-- WHERE datname = 'plpgsql_debug' AND pid <> pg_backend_pid();
+
+CREATE EXTENSION dblink;
+CREATE TABLE log (
+    id       integer PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
+    username text,
+    ts       timestamptz,
+    message  text
+);
+CREATE PROCEDURE write_log(message text)
+AS $$
+DECLARE
+    cmd text;
+BEGIN
+    cmd := format(
+        'INSERT INTO log (username, ts, message)
+         VALUES (%L, %L::timestamptz, %L)',
+        user, clock_timestamp()::text, write_log.message
+    );
+    PERFORM dblink('dbname=' || current_database(), cmd);
+END;
+$$ LANGUAGE plpgsql;
+CREATE OR REPLACE PROCEDURE write_log(message text)
+AS $$
+DECLARE
+    cmd text;
+BEGIN
+    cmd := format(
+        'INSERT INTO log (username, ts, message)
+         VALUES (%L, %L::timestamptz, %L)',
+        user, clock_timestamp()::text, write_log.message
+    );
+    PERFORM dblink('dbname=' || current_database(), cmd);
+END;
+$$ LANGUAGE plpgsql;
+
+BEGIN;
+CALL long_running();
+ROLLBACK;
+SELECT username, to_char(ts, 'HH24:MI:SS') as ts, message
+FROM log
+ORDER BY id;
+
+CREATE EXTENSION adminpack;
+CREATE PROCEDURE write_file(message text)
+AS $$
+DECLARE
+    filename CONSTANT text := '/var/lib/postgresql/log.txt';
+    message text;
+BEGIN
+    message := format(E'%s, %s, %s\n',
+        session_user, clock_timestamp()::text, write_file.message
+    );
+    PERFORM pg_file_write(filename, message, /* append */ true);
+END;
+$$ LANGUAGE plpgsql;
+CREATE OR REPLACE PROCEDURE long_running()
+AS $$
+BEGIN
+    CALL write_file('long_running. Stage 1/3...');
+    PERFORM pg_sleep(2);
+
+    CALL write_file('long_running. Stage 2/3...');
+    PERFORM pg_sleep(3);
+
+    CALL write_file('long_running. Stage 3/3...');
+    PERFORM pg_sleep(1);
+
+    CALL write_file('long_running. Done.');
+END;
+$$ LANGUAGE plpgsql;
+
+-- Трассировка сеансов
+SET log_statement = 'all';
+SELECT get_count('pg_views');
+RESET log_statement;
+LOAD 'auto_explain';
+SET auto_explain.log_min_duration = 0;
+SET auto_explain.log_nested_statements = on;
+SET auto_explain.log_level = 'NOTICE';
+SELECT get_count('pg_views');
+
+-- Практика
+CREATE OR REPLACE FUNCTION get_catalog(
+    author_name text,
+    book_title text,
+    in_stock boolean
+)
+RETURNS TABLE(book_id integer, display_name text, onhand_qty integer)
+AS $$
+DECLARE
+    title_cond text := '';
+    author_cond text := '';
+    qty_cond text := '';
+    cmd text := '';
+BEGIN
+    IF book_title != '' THEN
+        title_cond := format(
+            ' AND cv.title ILIKE %L', '%'||book_title||'%'
+        );
+    END IF;
+    IF author_name != '' THEN
+        author_cond := format(
+            ' AND cv.authors ILIKE %L', '%'||author_name||'%'
+        );
+    END IF;
+    IF in_stock THEN
+        qty_cond := ' AND cv.onhand_qty > 0';
+    END IF;
+    cmd := '
+        SELECT cv.book_id,
+               cv.display_name,
+               cv.onhand_qty
+        FROM   catalog_v cv
+        WHERE  true'
+        || title_cond || author_cond || qty_cond || '
+        ORDER BY display_name';
+
+    RAISE LOG 'DEBUG get_catalog (%, %, %): %',
+        author_name, book_title, in_stock, cmd;
+    RETURN QUERY EXECUTE cmd;
+END;
+$$ STABLE LANGUAGE plpgsql;
+ALTER SYSTEM SET log_min_duration_statement = 0;
+SELECT pg_reload_conf();
+ALTER SYSTEM RESET log_min_duration_statement;
+SELECT pg_reload_conf();
+
+CREATE DATABASE plpgsql_debug;
+\c plpgsql_debug
+LOAD 'plpgsql_check';
+SET plpgsql_check.enable_tracer = on;
+SET plpgsql_check.tracer = on;
+CREATE FUNCTION foo(n integer) RETURNS integer
+AS $$
+BEGIN
+    RETURN bar(n-1);
+END;
+$$ LANGUAGE plpgsql;
+CREATE FUNCTION bar(n integer) RETURNS integer
+AS $$
+BEGIN
+    RETURN baz(n-1);
+END;
+$$ LANGUAGE plpgsql;
+CREATE FUNCTION baz(n integer) RETURNS integer
+AS $$
+BEGIN
+    RETURN n;
+END;
+$$ LANGUAGE plpgsql;
+SELECT foo(3);
+SET plpgsql_check.tracer = off;
+
+CREATE PROCEDURE raise_msg(msg text)
+AS $$
+DECLARE
+    ctx text;
+    stack text[];
+BEGIN
+    GET DIAGNOSTICS ctx = pg_context;
+    stack := regexp_split_to_array(ctx, E'\n');
+    RAISE NOTICE '%: %',
+        repeat('. ', array_length(stack,1)-2) || stack[3], msg;
+END;
+$$ LANGUAGE plpgsql;
+CREATE TABLE t(n integer);
+CREATE FUNCTION on_insert() RETURNS trigger
+AS $$
+BEGIN
+    CALL raise_msg('NEW = '||NEW::text);
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+CREATE TRIGGER t_before_row
+BEFORE INSERT ON t
+FOR EACH ROW
+EXECUTE FUNCTION on_insert();
+CREATE PROCEDURE insert_into_t()
+AS $$
+BEGIN
+    CALL raise_msg('start');
+    INSERT INTO t SELECT id FROM generate_series(1,3) id;
+    CALL raise_msg('end');
+END;
+$$ LANGUAGE plpgsql;
+CALL insert_into_t();
+

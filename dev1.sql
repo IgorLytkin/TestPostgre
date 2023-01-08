@@ -831,6 +831,123 @@ SELECT * FROM continue_game(1,true);
 SELECT * FROM continue_game(5,true);
 SELECT * FROM continue_game(4,true);
 
+-- 10. Составные типы
+-- Практика
+CREATE OR REPLACE FUNCTION onhand_qty(book books) RETURNS integer
+AS $$
+    SELECT coalesce(sum(o.qty_change),0)::integer
+    FROM operations o
+    WHERE o.book_id = book.book_id;
+$$ STABLE LANGUAGE sql;
+DROP VIEW IF EXISTS catalog_v;
+CREATE VIEW catalog_v AS
+SELECT b.book_id,
+       book_name(b.book_id, b.title) AS display_name,
+       b.onhand_qty
+FROM   books b
+ORDER BY display_name;
+CREATE OR REPLACE FUNCTION authors(book books) RETURNS text
+AS $$
+    SELECT string_agg(
+               a.last_name ||
+               ' ' ||
+               a.first_name ||
+               coalesce(' ' || nullif(a.middle_name,''), ''),
+               ', '
+               ORDER BY ash.seq_num
+           )
+    FROM   authors a
+           JOIN authorship ash ON a.author_id = ash.author_id
+    WHERE  ash.book_id = book.book_id;
+$$ STABLE LANGUAGE sql;
+DROP VIEW catalog_v;
+CREATE VIEW catalog_v AS
+SELECT b.book_id,
+       b.title,
+       b.onhand_qty,
+       book_name(b.book_id, b.title) AS display_name,
+       b.authors
+FROM   books b
+ORDER BY display_name;
+CREATE OR REPLACE FUNCTION get_catalog(
+    author_name text,
+    book_title text,
+    in_stock boolean
+)
+RETURNS TABLE(book_id integer, display_name text, onhand_qty integer)
+AS $$
+    SELECT cv.book_id,
+           cv.display_name,
+           cv.onhand_qty
+    FROM   catalog_v cv
+    WHERE  cv.title   ILIKE '%'||coalesce(book_title,'')||'%'
+    AND    cv.authors ILIKE '%'||coalesce(author_name,'')||'%'
+    AND    (in_stock AND cv.onhand_qty > 0 OR in_stock IS NOT TRUE)
+    ORDER BY display_name;
+$$ STABLE LANGUAGE sql;
+
+CREATE FUNCTION digit(d text) RETURNS integer
+AS $$
+SELECT ascii(d) - CASE
+        WHEN d BETWEEN '0' AND '9' THEN ascii('0')
+        ELSE ascii('A') - 10
+    END;
+$$ IMMUTABLE LANGUAGE sql;
+CREATE FUNCTION convert(hex text) RETURNS integer
+AS $$
+WITH s(d,ord) AS (
+    SELECT *
+    FROM regexp_split_to_table(reverse(upper(hex)),'') WITH ORDINALITY
+)
+SELECT sum(digit(d) * 16^(ord-1))::integer
+FROM s;
+$$ IMMUTABLE LANGUAGE sql;
+SELECT convert('0FE'), convert('0FF'), convert('100');
+
+DROP FUNCTION convert(text);
+CREATE FUNCTION convert(num text, radix integer DEFAULT 16)
+RETURNS integer
+AS $$
+WITH s(d,ord) AS (
+    SELECT *
+    FROM regexp_split_to_table(reverse(upper(num)),'') WITH ORDINALITY
+)
+SELECT sum(digit(d) * radix^(ord-1))::integer
+FROM s;
+$$ IMMUTABLE LANGUAGE sql;
+SELECT convert('0110',2), convert('0FF'), convert('Z',36);
+
+CREATE FUNCTION text2num(s text) RETURNS integer
+AS $$
+WITH s(d,ord) AS (
+    SELECT *
+    FROM regexp_split_to_table(reverse(s),'') WITH ORDINALITY
+)
+SELECT sum( (ascii(d)-ascii('A')) * 26^(ord-1))::integer
+FROM s;
+$$ IMMUTABLE LANGUAGE sql;
+CREATE FUNCTION num2text(n integer, digits integer) RETURNS text
+AS $$
+WITH RECURSIVE r(num,txt, level) AS (
+    SELECT n/26, chr( n%26 + ascii('A') )::text, 1
+    UNION ALL
+    SELECT r.num/26, chr( r.num%26 + ascii('A') ) || r.txt, r.level+1
+    FROM r
+    WHERE r.level < digits
+)
+SELECT r.txt FROM r WHERE r.level = digits;
+$$ IMMUTABLE LANGUAGE sql;
+SELECT num2text( text2num('ABC'), length('ABC') );
+
+CREATE FUNCTION generate_series(start text, stop text)
+RETURNS SETOF text
+AS $$
+    SELECT num2text( g.n, length(start) )
+    FROM generate_series(text2num(start), text2num(stop)) g(n);
+$$ IMMUTABLE LANGUAGE sql;
+SELECT generate_series('AZ','BC');
+
+-- 13. Курсоры
 CREATE TABLE t(id integer, s text);
  INSERT INTO t VALUES (1, 'Раз'), (2, 'Два'), (3, 'Три');
 
@@ -977,38 +1094,39 @@ ROLLBACK;
 BEGIN;
 DELETE FROM t RETURNING *;
 ROLLBACK;
-
--- 10. Составные типы
 -- Практика
-CREATE OR REPLACE FUNCTION onhand_qty(book books) RETURNS integer
+DROP FUNCTION book_name(integer,text) CASCADE;
+CREATE OR REPLACE FUNCTION book_name(
+    book_id integer,
+    title text,
+    maxauthors integer DEFAULT 2
+)
+RETURNS text
 AS $$
-    SELECT coalesce(sum(o.qty_change),0)::integer
-    FROM operations o
-    WHERE o.book_id = book.book_id;
-$$ STABLE LANGUAGE sql;
-DROP VIEW IF EXISTS catalog_v;
-CREATE VIEW catalog_v AS
-SELECT b.book_id,
-       book_name(b.book_id, b.title) AS display_name,
-       b.onhand_qty
-FROM   books b
-ORDER BY display_name;
-CREATE OR REPLACE FUNCTION authors(book books) RETURNS text
-AS $$
-    SELECT string_agg(
-               a.last_name ||
-               ' ' ||
-               a.first_name ||
-               coalesce(' ' || nullif(a.middle_name,''), ''),
-               ', '
-               ORDER BY ash.seq_num
-           )
-    FROM   authors a
-           JOIN authorship ash ON a.author_id = ash.author_id
-    WHERE  ash.book_id = book.book_id;
-$$ STABLE LANGUAGE sql;
-DROP VIEW catalog_v;
-CREATE VIEW catalog_v AS
+DECLARE
+    r record;
+    res text;
+BEGIN
+    res := shorten(title) || '. ';
+    FOR r IN (
+        SELECT a.last_name, a.first_name, a.middle_name, ash.seq_num
+        FROM   authors a
+               JOIN authorship ash ON a.author_id = ash.author_id
+        WHERE  ash.book_id = book_name.book_id
+        ORDER BY ash.seq_num
+    )
+    LOOP
+        EXIT WHEN r.seq_num > maxauthors;
+        res := res || author_name(r.last_name, r.first_name, r.middle_name) || ', ';
+    END LOOP;
+    res := rtrim(res, ', ');
+    IF r.seq_num > maxauthors THEN
+        res := res || ' и др.';
+    END IF;
+    RETURN res;
+END;
+$$ STABLE LANGUAGE plpgsql;
+CREATE OR REPLACE VIEW catalog_v AS
 SELECT b.book_id,
        b.title,
        b.onhand_qty,
@@ -1016,83 +1134,29 @@ SELECT b.book_id,
        b.authors
 FROM   books b
 ORDER BY display_name;
-CREATE OR REPLACE FUNCTION get_catalog(
-    author_name text,
-    book_title text,
-    in_stock boolean
+SELECT book_id, display_name FROM catalog_v;
+CREATE OR REPLACE FUNCTION book_name(
+    book_id integer,
+    title text,
+    maxauthors integer DEFAULT 2
 )
-RETURNS TABLE(book_id integer, display_name text, onhand_qty integer)
+RETURNS text
 AS $$
-    SELECT cv.book_id,
-           cv.display_name,
-           cv.onhand_qty
-    FROM   catalog_v cv
-    WHERE  cv.title   ILIKE '%'||coalesce(book_title,'')||'%'
-    AND    cv.authors ILIKE '%'||coalesce(author_name,'')||'%'
-    AND    (in_stock AND cv.onhand_qty > 0 OR in_stock IS NOT TRUE)
-    ORDER BY display_name;
+SELECT shorten(book_name.title) ||
+       '. ' ||
+       string_agg(
+           author_name(a.last_name, a.first_name, a.middle_name), ', '
+           ORDER BY ash.seq_num
+       ) FILTER (WHERE ash.seq_num <= maxauthors) ||
+       CASE
+           WHEN max(ash.seq_num) > maxauthors THEN ' и др.'
+           ELSE ''
+       END
+FROM   authors a
+       JOIN authorship ash ON a.author_id = ash.author_id
+WHERE  ash.book_id = book_name.book_id;
 $$ STABLE LANGUAGE sql;
-
-CREATE FUNCTION digit(d text) RETURNS integer
-AS $$
-SELECT ascii(d) - CASE
-        WHEN d BETWEEN '0' AND '9' THEN ascii('0')
-        ELSE ascii('A') - 10
-    END;
-$$ IMMUTABLE LANGUAGE sql;
-CREATE FUNCTION convert(hex text) RETURNS integer
-AS $$
-WITH s(d,ord) AS (
-    SELECT *
-    FROM regexp_split_to_table(reverse(upper(hex)),'') WITH ORDINALITY
-)
-SELECT sum(digit(d) * 16^(ord-1))::integer
-FROM s;
-$$ IMMUTABLE LANGUAGE sql;
-SELECT convert('0FE'), convert('0FF'), convert('100');
-
-DROP FUNCTION convert(text);
-CREATE FUNCTION convert(num text, radix integer DEFAULT 16)
-RETURNS integer
-AS $$
-WITH s(d,ord) AS (
-    SELECT *
-    FROM regexp_split_to_table(reverse(upper(num)),'') WITH ORDINALITY
-)
-SELECT sum(digit(d) * radix^(ord-1))::integer
-FROM s;
-$$ IMMUTABLE LANGUAGE sql;
-SELECT convert('0110',2), convert('0FF'), convert('Z',36);
-
-CREATE FUNCTION text2num(s text) RETURNS integer
-AS $$
-WITH s(d,ord) AS (
-    SELECT *
-    FROM regexp_split_to_table(reverse(s),'') WITH ORDINALITY
-)
-SELECT sum( (ascii(d)-ascii('A')) * 26^(ord-1))::integer
-FROM s;
-$$ IMMUTABLE LANGUAGE sql;
-CREATE FUNCTION num2text(n integer, digits integer) RETURNS text
-AS $$
-WITH RECURSIVE r(num,txt, level) AS (
-    SELECT n/26, chr( n%26 + ascii('A') )::text, 1
-    UNION ALL
-    SELECT r.num/26, chr( r.num%26 + ascii('A') ) || r.txt, r.level+1
-    FROM r
-    WHERE r.level < digits
-)
-SELECT r.txt FROM r WHERE r.level = digits;
-$$ IMMUTABLE LANGUAGE sql;
-SELECT num2text( text2num('ABC'), length('ABC') );
-
-CREATE FUNCTION generate_series(start text, stop text)
-RETURNS SETOF text
-AS $$
-    SELECT num2text( g.n, length(start) )
-    FROM generate_series(text2num(start), text2num(stop)) g(n);
-$$ IMMUTABLE LANGUAGE sql;
-SELECT generate_series('AZ','BC');
+SELECT book_id, display_name FROM catalog_v;
 
 -- 14. Динамический SQL
 DO $$
@@ -2962,3 +3026,127 @@ END;
 $$ LANGUAGE plpgsql;
 CALL insert_into_t();
 
+-- DEV1-12.19 Обзор разграничения доступа
+CREATE ROLE alice LOGIN PASSWORD 'alicepass';
+\du
+CREATE DATABASE access_overview;
+SELECT type, database, user_name, address, auth_method
+FROM pg_hba_file_rules();
+ALTER ROLE alice PASSWORD 'alicepass';
+
+CREATE SCHEMA alice;
+GRANT CREATE ON DATABASE access_overview TO alice;
+SELECT current_schemas(true);
+CREATE TABLE t1(n numeric);
+INSERT INTO t1 VALUES (1);
+CREATE TABLE t2(n numeric, who text DEFAULT current_user);
+INSERT INTO t2(n) VALUES (1);
+CREATE ROLE bob LOGIN PASSWORD 'bobpass';
+SELECT * FROM alice.t1;
+ GRANT CREATE, USAGE ON SCHEMA alice TO bob;
+GRANT SELECT,UPDATE ON alice.t1 TO bob;
+GRANT SELECT(n),INSERT ON alice.t2 TO bob;
+
+-- В сессии bob
+SET search_path = public, alice;
+UPDATE t1 SET n = n + 1;
+SELECT * FROM t1;
+DELETE FROM t1;
+INSERT INTO t2(n) VALUES (100);
+SELECT n FROM t2;
+SELECT * FROM t2;
+
+-- В сессии alice
+CREATE FUNCTION foo() RETURNS SETOF t2
+AS $$
+SELECT * FROM t2;
+$$ LANGUAGE sql STABLE;
+
+-- bob
+CREATE TABLE t2(n numeric, who text DEFAULT current_user);
+INSERT INTO t2(n) VALUES (42);
+SELECT foo();
+
+-- alice
+ALTER FUNCTION foo() SECURITY DEFINER;
+
+-- bob
+DROP TABLE t2;
+SELECT foo();
+
+-- alice
+REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA alice FROM public;
+CREATE FUNCTION bar() RETURNS integer AS $$
+SELECT 1;
+$$ LANGUAGE sql IMMUTABLE SECURITY DEFINER;
+
+ALTER DEFAULT PRIVILEGES
+FOR ROLE alice
+REVOKE EXECUTE ON FUNCTIONS FROM public;
+
+CREATE FUNCTION baz() RETURNS integer AS $$
+SELECT 1;
+$$ LANGUAGE sql IMMUTABLE SECURITY DEFINER;
+
+SELECT * FROM t2;
+CREATE POLICY who_policy ON t2
+USING (who = current_user);
+ALTER TABLE t2 ENABLE ROW LEVEL SECURITY;
+
+
+-- bob
+SELECT n FROM t2;
+INSERT INTO t2(n) VALUES (101);
+SELECT n FROM t2;
+
+-- alice
+SELECT * FROM t2;
+ALTER TABLE t2 FORCE ROW LEVEL SECURITY;
+SELECT * FROM t2;
+
+-- Практика
+-- в сессии student
+CREATE ROLE employee LOGIN PASSWORD 'employee';
+CREATE ROLE buyer LOGIN PASSWORD 'buyer';
+REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA bookstore FROM public;
+REVOKE CONNECT ON DATABASE bookstore FROM public;
+ALTER FUNCTION get_catalog(text,text,boolean) SECURITY DEFINER;
+ALTER FUNCTION update_catalog() SECURITY DEFINER;
+ALTER FUNCTION add_author(text,text,text) SECURITY DEFINER;
+ALTER FUNCTION add_book(text,integer[]) SECURITY DEFINER;
+ ALTER FUNCTION buy_book(integer) SECURITY DEFINER;
+ALTER FUNCTION book_name(integer,text,integer) SECURITY DEFINER;
+ALTER FUNCTION authors(books) SECURITY DEFINER;
+GRANT CONNECT ON DATABASE bookstore TO buyer;
+GRANT USAGE ON SCHEMA bookstore TO buyer;
+GRANT EXECUTE ON FUNCTION get_catalog(text,text,boolean) TO buyer;
+GRANT EXECUTE ON FUNCTION buy_book(integer) TO buyer;
+GRANT CONNECT ON DATABASE bookstore TO employee;
+GRANT USAGE ON SCHEMA bookstore TO employee;
+GRANT SELECT,UPDATE(onhand_qty) ON catalog_v TO employee;
+GRANT SELECT ON authors_v TO employee;
+GRANT EXECUTE ON FUNCTION book_name(integer,text,integer) TO employee;
+GRANT EXECUTE ON FUNCTION authors(books) TO employee;
+GRANT EXECUTE ON FUNCTION author_name(text,text,text) TO employee;
+GRANT EXECUTE ON FUNCTION add_book(text,integer[]) TO employee;
+GRANT EXECUTE ON FUNCTION add_author(text,text,text) TO employee;
+
+-- Практика
+CREATE DATABASE access_overview;
+
+-- БД access_overview!
+CREATE PROCEDURE trace(val boolean)
+AS $$
+SELECT set_config(
+    'log_statement',
+    CASE WHEN val THEN 'all' ELSE 'none' END,
+    false /* is_local */
+);
+$$ LANGUAGE sql SECURITY DEFINER;
+REVOKE EXECUTE ON PROCEDURE trace FROM public;
+GRANT EXECUTE ON ROUTINE trace TO alice;
+
+-- alice
+CALL trace(true);
+SELECT 2*2;
+CALL trace(false);

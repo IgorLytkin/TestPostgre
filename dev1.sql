@@ -1,3 +1,81 @@
+CREATE SCHEMA bookstore;
+ALTER DATABASE bookstore SET search_path = bookstore, public;
+\c bookstore
+SHOW search_path;
+CREATE TABLE authors(
+    author_id integer PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
+    last_name text NOT NULL,
+    first_name text NOT NULL,
+    middle_name text
+);
+CREATE TABLE books(
+    book_id integer PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
+    title text NOT NULL
+);
+CREATE TABLE authorship(
+    book_id integer REFERENCES books,
+    author_id integer REFERENCES authors,
+    seq_num integer NOT NULL,
+    PRIMARY KEY (book_id,author_id)
+);
+CREATE TABLE operations(
+    operation_id integer PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
+    book_id integer NOT NULL REFERENCES books,
+    qty_change integer NOT NULL,
+    date_created date NOT NULL DEFAULT current_date
+);
+INSERT INTO authors(last_name, first_name, middle_name)
+VALUES
+    ('Пушкин', 'Александр', 'Сергеевич'),
+    ('Тургенев', 'Иван', 'Сергеевич'),
+    ('Стругацкий', 'Борис', 'Натанович'),
+    ('Стругацкий', 'Аркадий', 'Натанович'),
+    ('Толстой', 'Лев', 'Николаевич'),
+    ('Свифт', 'Джонатан', NULL);
+INSERT INTO books(title)
+VALUES
+    ('Сказка о царе Салтане'),
+    ('Муму'),
+    ('Трудно быть богом'),
+    ('Война и мир'),
+    ('Путешествия в некоторые удаленные страны мира в четырех частях: сочинение Лемюэля Гулливера, сначала хирурга, а затем капитана нескольких кораблей'),
+    ('Хрестоматия');
+INSERT INTO authorship(book_id, author_id, seq_num)
+VALUES
+    (1, 1, 1),
+    (2, 2, 1),
+    (3, 3, 2),
+    (3, 4, 1),
+    (4, 5, 1),
+    (5, 6, 1),
+    (6, 1, 1),
+    (6, 5, 2),
+    (6, 2, 3);
+COPY operations (operation_id, book_id, qty_change) FROM stdin;
+
+SELECT pg_catalog.setval('operations_operation_id_seq', 3, true);
+
+CREATE VIEW authors_v AS
+SELECT a.author_id,
+       a.last_name || ' ' ||
+       a.first_name ||
+       coalesce(' ' || nullif(a.middle_name, ''), '') AS display_name
+FROM   authors a;
+CREATE VIEW catalog_v AS
+SELECT b.book_id,
+       b.title AS display_name
+FROM   books b;
+CREATE VIEW operations_v AS
+SELECT book_id,
+       CASE
+           WHEN qty_change > 0 THEN 'Поступление'
+           ELSE 'Покупка'
+       END op_type,
+       abs(qty_change) qty_change,
+       to_char(date_created, 'DD.MM.YYYY') date_created
+FROM   operations
+ORDER BY operation_id;
+
 DO $$
 BEGIN
     -- сами операторы могут и отсутствовать
@@ -900,7 +978,23 @@ BEGIN;
 DELETE FROM t RETURNING *;
 ROLLBACK;
 
--- Динамический SQL
+-- 10. Составные типы
+-- Практика
+CREATE OR REPLACE FUNCTION onhand_qty(book books) RETURNS integer
+AS $$
+    SELECT coalesce(sum(o.qty_change),0)::integer
+    FROM operations o
+    WHERE o.book_id = book.book_id;
+$$ STABLE LANGUAGE sql;
+DROP VIEW IF EXISTS catalog_v;
+CREATE VIEW catalog_v AS
+SELECT b.book_id,
+       book_name(b.book_id, b.title) AS display_name,
+       b.onhand_qty
+FROM   books b
+ORDER BY display_name;
+
+-- 14. Динамический SQL
 DO $$
 DECLARE
     cmd CONSTANT text := 'CREATE TABLE city_msk(
@@ -1303,81 +1397,1014 @@ BEGIN
 END;
 $$ VOLATILE LANGUAGE plpgsql;
 
-CREATE SCHEMA bookstore;
-ALTER DATABASE bookstore SET search_path = bookstore, public;
-\c bookstore
-SHOW search_path;
-CREATE TABLE authors(
-    author_id integer PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
-    last_name text NOT NULL,
-    first_name text NOT NULL,
-    middle_name text
+CREATE TABLE posts_tags(
+    post_id integer REFERENCES posts(post_id),
+    tag_id integer REFERENCES tags(tag_id)
 );
-CREATE TABLE books(
-    book_id integer PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
-    title text NOT NULL
-);
-CREATE TABLE authorship(
-    book_id integer REFERENCES books,
-    author_id integer REFERENCES authors,
-    seq_num integer NOT NULL,
-    PRIMARY KEY (book_id,author_id)
-);
-CREATE TABLE operations(
-    operation_id integer PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
-    book_id integer NOT NULL REFERENCES books,
-    qty_change integer NOT NULL,
-    date_created date NOT NULL DEFAULT current_date
-);
-INSERT INTO authors(last_name, first_name, middle_name)
-VALUES
-    ('Пушкин', 'Александр', 'Сергеевич'),
-    ('Тургенев', 'Иван', 'Сергеевич'),
-    ('Стругацкий', 'Борис', 'Натанович'),
-    ('Стругацкий', 'Аркадий', 'Натанович'),
-    ('Толстой', 'Лев', 'Николаевич'),
-    ('Свифт', 'Джонатан', NULL);
-INSERT INTO books(title)
-VALUES
-    ('Сказка о царе Салтане'),
-    ('Муму'),
-    ('Трудно быть богом'),
-    ('Война и мир'),
-    ('Путешествия в некоторые удаленные страны мира в четырех частях: сочинение Лемюэля Гулливера, сначала хирурга, а затем капитана нескольких кораблей'),
-    ('Хрестоматия');
-INSERT INTO authorship(book_id, author_id, seq_num)
-VALUES
-    (1, 1, 1),
-    (2, 2, 1),
-    (3, 3, 2),
-    (3, 4, 1),
-    (4, 5, 1),
-    (5, 6, 1),
-    (6, 1, 1),
-    (6, 5, 2),
-    (6, 2, 3);
-COPY operations (operation_id, book_id, qty_change) FROM stdin;
+INSERT INTO posts(post_id,message) VALUES
+    (1, 'Перечитывал пейджер, много думал.'),
+    (2, 'Это было уже весной, и я отнес елку обратно.');
+INSERT INTO tags(tag_id,name) VALUES
+    (1, 'былое и думы'), (2, 'технологии'), (3, 'семья');
+INSERT INTO posts_tags(post_id,tag_id) VALUES
+    (1,1), (1,2), (2,1), (2,3);
+SELECT p.message, t.name
+FROM posts p
+     JOIN posts_tags pt ON pt.post_id = p.post_id
+     JOIN tags t ON t.tag_id = pt.tag_id
+ORDER BY p.post_id, t.name;
+SELECT p.message, array_agg(t.name ORDER BY t.name) tags
+FROM posts p
+     JOIN posts_tags pt ON pt.post_id = p.post_id
+     JOIN tags t ON t.tag_id = pt.tag_id
+GROUP BY p.post_id
+ORDER BY p.post_id;
+SELECT p.message
+FROM posts p
+     JOIN posts_tags pt ON pt.post_id = p.post_id
+     JOIN tags t ON t.tag_id = pt.tag_id
+WHERE t.name = 'былое и думы'
+ORDER BY p.post_id;
+SELECT t.name
+FROM tags t
+ORDER BY t.name;
 
-SELECT pg_catalog.setval('operations_operation_id_seq', 3, true);
+DROP TABLE posts_tags;
+DROP TABLE tags;
+ALTER TABLE posts ADD COLUMN tags text[];
+UPDATE posts SET tags = '{"былое и думы","технологии"}'
+WHERE post_id = 1;
+UPDATE posts SET tags = '{"былое и думы","семья"}'
+WHERE post_id = 2;
+SELECT p.message, p.tags
+FROM posts p
+ORDER BY p.post_id;
+SELECT p.message
+FROM posts p
+WHERE p.tags && '{"былое и думы"}'
+ORDER BY p.post_id;
+SELECT DISTINCT unnest(p.tags) AS name
+FROM posts p;
 
-CREATE VIEW authors_v AS
-SELECT a.author_id,
-       a.last_name || ' ' ||
-       a.first_name ||
-       coalesce(' ' || nullif(a.middle_name, ''), '') AS display_name
-FROM   authors a;
-CREATE VIEW catalog_v AS
+-- Практика
+CREATE OR REPLACE FUNCTION add_book(title text, authors integer[])
+RETURNS integer
+AS $$
+DECLARE
+    book_id integer;
+    id integer;
+    seq_num integer := 1;
+BEGIN
+    INSERT INTO books(title)
+        VALUES(title)
+        RETURNING books.book_id INTO book_id;
+    FOREACH id IN ARRAY authors LOOP
+        INSERT INTO authorship(book_id, author_id, seq_num)
+            VALUES (book_id, id, seq_num);
+        seq_num := seq_num + 1;
+    END LOOP;
+    RETURN book_id;
+END;
+$$ VOLATILE LANGUAGE plpgsql;
+
+CREATE DATABASE plpgsql_arrays;
+\c plpgsql_arrays
+CREATE FUNCTION map(a INOUT float[], func text)
+AS $$
+DECLARE
+    i integer;
+    x float;
+BEGIN
+    IF cardinality(a) > 0 THEN
+        FOR i IN array_lower(a,1)..array_upper(a,1) LOOP
+            EXECUTE format('SELECT %I($1)',func) USING a[i] INTO x;
+            a[i] := x;
+        END LOOP;
+    END IF;
+END;
+$$ IMMUTABLE LANGUAGE plpgsql;
+SELECT map(ARRAY[4.0,9.0,16.0],'sqrt');
+SELECT map(ARRAY[]::float[],'sqrt');
+
+CREATE OR REPLACE FUNCTION map(a float[], func text) RETURNS float[]
+AS $$
+DECLARE
+    x float;
+    b float[]; -- пустой массив
+BEGIN
+    FOREACH x IN ARRAY a LOOP
+        EXECUTE format('SELECT %I($1)',func) USING x INTO x;
+        b := b || x;
+    END LOOP;
+    RETURN b;
+END;
+$$ IMMUTABLE LANGUAGE plpgsql;
+SELECT map(ARRAY[4.0,9.0,16.0],'sqrt');
+SELECT map(ARRAY[]::float[],'sqrt');
+
+CREATE FUNCTION reduce(a float[], func text) RETURNS float
+AS $$
+DECLARE
+    i integer;
+    r float := NULL;
+BEGIN
+    IF cardinality(a) > 0 THEN
+        r := a[array_lower(a,1)];
+        FOR i IN array_lower(a,1)+1 .. array_upper(a,1) LOOP
+            EXECUTE format('SELECT %I($1,$2)',func) USING r, a[i]
+                INTO r;
+        END LOOP;
+    END IF;
+    RETURN r;
+END;
+$$ IMMUTABLE LANGUAGE plpgsql;
+SELECT reduce( ARRAY[1.0,3.0,2.0], 'greatest');
+
+CREATE FUNCTION maximum(VARIADIC a anyarray, maxsofar OUT anyelement)
+AS $$
+DECLARE
+    x maxsofar%TYPE;
+BEGIN
+    FOREACH x IN ARRAY a LOOP
+        IF x IS NOT NULL AND (maxsofar IS NULL OR x > maxsofar) THEN
+            maxsofar := x;
+        END IF;
+    END LOOP;
+END;
+$$ IMMUTABLE LANGUAGE plpgsql;
+SELECT reduce(ARRAY[1.0,3.0,2.0], 'maximum');
+SELECT reduce(ARRAY[1.0], 'maximum');
+SELECT reduce(ARRAY[]::float[], 'maximum');
+
+CREATE OR REPLACE FUNCTION reduce(a float[], func text) RETURNS float
+AS $$
+DECLARE
+    x float;
+    r float;
+    first boolean := true;
+BEGIN
+    FOREACH x IN ARRAY a LOOP
+        IF first THEN
+            r := x;
+            first := false;
+        ELSE
+            EXECUTE format('SELECT %I($1,$2)',func) USING r, x INTO r;
+        END IF;
+    END LOOP;
+    RETURN r;
+END;
+$$ IMMUTABLE LANGUAGE plpgsql;
+SELECT reduce(ARRAY[1.0,3.0,2.0], 'maximum');
+SELECT reduce(ARRAY[1.0], 'maximum');
+SELECT reduce(ARRAY[]::float[], 'maximum');
+
+DROP FUNCTION map(float[],text);
+CREATE FUNCTION map(
+    a anyarray,
+    func text,
+    elem anyelement DEFAULT NULL
+)
+RETURNS anyarray
+AS $$
+DECLARE
+    x elem%TYPE;
+    b a%TYPE;
+BEGIN
+    FOREACH x IN ARRAY a LOOP
+        EXECUTE format('SELECT %I($1)',func) USING x INTO x;
+        b := b || x;
+    END LOOP;
+    RETURN b;
+END;
+$$ IMMUTABLE LANGUAGE plpgsql;
+SELECT map(ARRAY[4.0,9.0,16.0],'sqrt');
+SELECT map(ARRAY[]::float[],'sqrt');
+SELECT map(ARRAY[' a ','  b','c  '],'btrim');
+
+DROP FUNCTION reduce(float[],text);
+CREATE FUNCTION reduce(
+    a anyarray,
+    func text,
+    elem anyelement DEFAULT NULL
+)
+RETURNS anyelement
+AS $$
+DECLARE
+    x elem%TYPE;
+    r elem%TYPE;
+    first boolean := true;
+BEGIN
+    FOREACH x IN ARRAY a LOOP
+        IF first THEN
+            r := x;
+            first := false;
+        ELSE
+            EXECUTE format('SELECT %I($1,$2)',func) USING r, x INTO r;
+        END IF;
+    END LOOP;
+    RETURN r;
+END;
+$$ IMMUTABLE LANGUAGE plpgsql;
+CREATE FUNCTION add(x anyelement, y anyelement) RETURNS anyelement
+AS $$
+BEGIN
+    RETURN x + y;
+END;
+$$ IMMUTABLE LANGUAGE plpgsql;
+SELECT reduce(ARRAY[1,-2,4], 'add');
+SELECT reduce(ARRAY['a','b','c'], 'concat');
+
+-- Обработка ошибок
+drop table t;
+CREATE TABLE t(id integer);
+INSERT INTO t(id) VALUES (1);
+
+DO $$
+DECLARE
+    n integer;
+BEGIN
+    SELECT id INTO STRICT n FROM t;
+    RAISE NOTICE 'Оператор SELECT INTO выполнился';
+END;
+$$;
+INSERT INTO t(id) VALUES (2);
+DO $$
+DECLARE
+    n integer;
+BEGIN
+    SELECT id INTO STRICT n FROM t;
+    RAISE NOTICE 'Оператор SELECT INTO выполнился';
+END;
+$$;
+
+DO $$
+DECLARE
+    n integer;
+BEGIN
+    INSERT INTO t(id) VALUES (3);
+    SELECT id INTO STRICT n FROM t;
+    RAISE NOTICE 'Оператор SELECT INTO выполнился';
+EXCEPTION
+    WHEN no_data_found THEN
+        RAISE NOTICE 'Нет данных';
+    WHEN too_many_rows THEN
+        RAISE NOTICE 'Слишком много данных';
+        RAISE NOTICE 'Строк в таблице: %', (SELECT count(*) FROM t);
+END;
+$$;
+
+DO $$
+DECLARE
+    n integer := 1 / 0; -- ошибка в этом месте не перехватывается
+BEGIN
+    RAISE NOTICE 'Все успешно';
+EXCEPTION
+    WHEN division_by_zero THEN
+        RAISE NOTICE 'Деление на ноль';
+END;
+$$;
+DO $$
+DECLARE
+    n integer;
+BEGIN
+    SELECT id INTO STRICT n FROM t;
+EXCEPTION
+    WHEN SQLSTATE 'P0003' OR no_data_found THEN -- можно несколько
+        RAISE NOTICE '%: %', SQLSTATE, SQLERRM;
+END;
+$$;
+DO $$
+DECLARE
+    n integer;
+BEGIN
+    SELECT id INTO STRICT n FROM t;
+EXCEPTION
+    WHEN no_data_found THEN
+        RAISE NOTICE 'Нет данных. %: %', SQLSTATE, SQLERRM;
+    WHEN plpgsql_error THEN
+        RAISE NOTICE 'Другая ошибка. %: %', SQLSTATE, SQLERRM;
+    WHEN too_many_rows THEN
+        RAISE NOTICE 'Слишком много данных. %: %', SQLSTATE, SQLERRM;
+END;
+$$;
+DO $$
+BEGIN
+    RAISE no_data_found;
+EXCEPTION
+    WHEN others THEN
+        RAISE NOTICE '%: %', SQLSTATE, SQLERRM;
+END;
+$$;
+DO $$
+BEGIN
+    RAISE SQLSTATE 'ERR01' USING
+        message = 'Сбой матрицы',
+        detail  = 'При выполнении произошел непоправимый сбой матрицы',
+        hint = 'Обратитесь к системному администратору';
+END;
+$$;
+DO $$
+DECLARE
+    message text;
+    detail text;
+    hint text;
+BEGIN
+    RAISE SQLSTATE 'ERR01' USING
+        message = 'Сбой матрицы',
+        detail  = 'При выполнении произошел непоправимый сбой матрицы',
+        hint = 'Обратитесь к системному администратору';
+EXCEPTION
+    WHEN others THEN
+        GET STACKED DIAGNOSTICS
+            message = message_text,
+            detail = pg_exception_detail,
+            hint = pg_exception_hint;
+        RAISE NOTICE E'\nmessage = %\ndetail = %\nhint = %',
+            message, detail, hint;
+END;
+$$;
+DO $$
+BEGIN
+    BEGIN
+        SELECT 1/0;
+        RAISE NOTICE 'Вложенный блок выполнен';
+    EXCEPTION
+        WHEN division_by_zero THEN
+            RAISE NOTICE 'Ошибка во вложенном блоке';
+    END;
+    RAISE NOTICE 'Внешний блок выполнен';
+EXCEPTION
+    WHEN division_by_zero THEN
+        RAISE NOTICE 'Ошибка во внешнем блоке';
+END;
+$$;
+DO $$
+BEGIN
+    BEGIN
+        SELECT 1/0;
+        RAISE NOTICE 'Вложенный блок выполнен';
+    EXCEPTION
+        WHEN no_data_found THEN
+            RAISE NOTICE 'Ошибка во вложенном блоке';
+    END;
+    RAISE NOTICE 'Внешний блок выполнен';
+EXCEPTION
+    WHEN division_by_zero THEN
+        RAISE NOTICE 'Ошибка во внешнем блоке';
+END;
+$$;
+DO $$
+BEGIN
+    BEGIN
+        SELECT 1/0;
+        RAISE NOTICE 'Вложенный блок выполнен';
+    EXCEPTION
+        WHEN no_data_found THEN
+            RAISE NOTICE 'Ошибка во вложенном блоке';
+    END;
+    RAISE NOTICE 'Внешний блок выполнен';
+EXCEPTION
+    WHEN no_data_found THEN
+        RAISE NOTICE 'Ошибка во внешнем блоке';
+END;
+$$;
+CREATE PROCEDURE foo()
+AS $$
+BEGIN
+    CALL bar();
+END;
+$$ LANGUAGE plpgsql;
+CREATE PROCEDURE bar()
+AS $$
+BEGIN
+    CALL baz();
+END;
+$$ LANGUAGE plpgsql;
+CREATE PROCEDURE baz()
+AS $$
+BEGIN
+    PERFORM 1 / 0;
+END;
+$$ LANGUAGE plpgsql;
+CALL foo();
+CREATE OR REPLACE PROCEDURE bar()
+AS $$
+DECLARE
+    msg text;
+    ctx text;
+BEGIN
+    CALL baz();
+EXCEPTION
+    WHEN others THEN
+        GET STACKED DIAGNOSTICS
+             msg = message_text,
+             ctx = pg_exception_context;
+        RAISE NOTICE E'\nОшибка: %\nСтек ошибки:\n%\n', msg, ctx;
+END;
+$$ LANGUAGE plpgsql;
+CALL foo();
+CREATE OR REPLACE PROCEDURE baz()
+AS $$
+BEGIN
+    COMMIT;
+END;
+$$ LANGUAGE plpgsql;
+CALL foo();
+CREATE TABLE data(comment text, n integer);
+INSERT INTO data(comment)
+SELECT CASE
+        WHEN random() < 0.01 THEN 'не число' --  1%
+        ELSE (random()*1000)::integer::text  -- 99%
+    END
+FROM generate_series(1,1000000);
+CREATE FUNCTION safe_to_integer_ex(s text) RETURNS integer
+AS $$
+BEGIN
+    RETURN s::integer;
+EXCEPTION
+    WHEN invalid_text_representation THEN
+        RETURN NULL;
+END
+$$ IMMUTABLE LANGUAGE plpgsql;
+
+\timing on
+UPDATE data SET n = safe_to_integer_ex(comment);
+\timing off
+SELECT count(*) FROM data WHERE n IS NOT NULL;
+
+CREATE FUNCTION safe_to_integer_re(s text) RETURNS integer
+AS $$
+BEGIN
+    RETURN CASE
+        WHEN s ~ '^\d+$' THEN s::integer
+        ELSE NULL
+    END;
+END
+$$ IMMUTABLE LANGUAGE plpgsql;
+
+\timing on
+UPDATE data SET n = safe_to_integer_re(comment);
+\timing off
+SELECT count(*) FROM data WHERE n IS NOT NULL;
+UPDATE data SET comment = 'не число';
+\timing on
+UPDATE data SET n = safe_to_integer_ex(comment);
+\timing off
+
+ CREATE TABLE categories(code text UNIQUE, description text);
+INSERT INTO categories VALUES ('books','Книги'), ('discs','Диски');
+CREATE FUNCTION get_cat_desc(code text) RETURNS text
+AS $$
+DECLARE
+    desc text;
+BEGIN
+    SELECT c.description INTO STRICT desc
+    FROM categories c
+    WHERE c.code = get_cat_desc.code;
+
+    RETURN desc;
+EXCEPTION
+    WHEN no_data_found THEN
+        RETURN NULL;
+END;
+$$ STABLE LANGUAGE plpgsql;
+SELECT get_cat_desc('books');
+SELECT get_cat_desc('movies');
+CREATE OR REPLACE FUNCTION get_cat_desc(code text) RETURNS text
+AS $$
+BEGIN
+    RETURN (SELECT c.description
+            FROM categories c
+            WHERE c.code = get_cat_desc.code);
+END;
+$$ STABLE LANGUAGE plpgsql;
+SELECT get_cat_desc('books');
+SELECT get_cat_desc('movies');
+
+CREATE OR REPLACE FUNCTION change(code text, description text)
+RETURNS void
+AS $$
+DECLARE
+    cnt integer;
+BEGIN
+    SELECT count(*) INTO cnt
+    FROM categories c WHERE c.code = change.code;
+
+    IF cnt = 0 THEN
+        INSERT INTO categories VALUES (code, description);
+    ELSE
+        UPDATE categories c
+        SET description = change.description
+        WHERE c.code = change.code;
+    END IF;
+END;
+$$ VOLATILE LANGUAGE plpgsql;
+CREATE OR REPLACE FUNCTION change(code text, description text)
+RETURNS void
+AS $$
+BEGIN
+    UPDATE categories c
+    SET description = change.description
+    WHERE c.code = change.code;
+
+    IF NOT FOUND THEN
+        PERFORM pg_sleep(1); -- тут может произойти все, что угодно
+        INSERT INTO categories VALUES (code, description);
+    END IF;
+END;
+$$ VOLATILE LANGUAGE plpgsql;
+ SELECT change('games', 'Игры');
+
+CREATE OR REPLACE FUNCTION change(code text, description text)
+RETURNS void
+AS $$
+BEGIN
+    LOOP
+        UPDATE categories c
+        SET description = change.description
+        WHERE c.code = change.code;
+
+        EXIT WHEN FOUND;
+        PERFORM pg_sleep(1); -- для демонстрации
+
+        BEGIN
+            INSERT INTO categories VALUES (code, description);
+            EXIT;
+        EXCEPTION
+            WHEN unique_violation THEN NULL;
+        END;
+    END LOOP;
+END;
+$$ VOLATILE LANGUAGE plpgsql;
+ SELECT change('vynil', 'Грампластинки');
+CREATE OR REPLACE FUNCTION change(code text, description text)
+RETURNS void
+AS $$
+    INSERT INTO categories VALUES (code, description)
+    ON CONFLICT(code)
+        DO UPDATE SET description = change.description;
+$$ VOLATILE LANGUAGE sql;
+CREATE OR REPLACE FUNCTION process_cat(code text) RETURNS text
+AS $$
+BEGIN
+    PERFORM c.code FROM categories c WHERE c.code = process_cat.code
+        FOR UPDATE NOWAIT;
+    PERFORM pg_sleep(1); -- собственно обработка
+    RETURN 'Категория обработана';
+EXCEPTION
+    WHEN lock_not_available THEN
+        RETURN 'Другой процесс уже обрабатывает эту категорию';
+END;
+$$ VOLATILE LANGUAGE plpgsql;
+SELECT process_cat('books');
+CREATE OR REPLACE FUNCTION process_cat(code text) RETURNS text
+AS $$
+BEGIN
+    IF pg_try_advisory_lock(hashtext(code)) THEN
+        PERFORM pg_sleep(1); -- собственно обработка
+        RETURN 'Категория обработана';
+    ELSE
+        RETURN 'Другой процесс уже обрабатывает эту категорию';
+    END IF;
+END;
+$$ VOLATILE LANGUAGE plpgsql;
+SELECT process_cat('books');
+
+CREATE TYPE doc_status AS ENUM -- тип перечисления
+    ('READY', 'ERROR', 'PROCESSED');
+CREATE TABLE documents(
+    id integer,
+    version integer,
+    status doc_status,
+    message text
+);
+INSERT INTO documents(id, version, status)
+    SELECT id, 1, 'READY' FROM generate_series(1,100) id;
+CREATE PROCEDURE process_one_doc(id integer)
+AS $$
+BEGIN
+    UPDATE documents d
+    SET version = version + 1
+    WHERE d.id = process_one_doc.id;
+    -- обработка может длиться долго
+    IF random() < 0.05 THEN
+        RAISE EXCEPTION 'Случилось страшное';
+    END IF;
+END;
+$$ LANGUAGE plpgsql;
+CREATE PROCEDURE process_docs()
+AS $$
+DECLARE
+    doc record;
+BEGIN
+    FOR doc IN (SELECT id FROM documents WHERE status = 'READY')
+    LOOP
+        BEGIN
+            CALL process_one_doc(doc.id);
+
+            UPDATE documents d
+            SET status = 'PROCESSED'
+            WHERE d.id = doc.id;
+        EXCEPTION
+            WHEN others THEN
+                UPDATE documents d
+                SET status = 'ERROR', message = sqlerrm
+                WHERE d.id = doc.id;
+        END;
+        COMMIT; -- каждый документ в своей транзакции
+    END LOOP;
+END;
+$$ LANGUAGE plpgsql;
+CALL process_docs();
+SELECT d.status, d.version, count(*)::integer
+FROM documents d
+GROUP BY d.status, d.version;
+SELECT * FROM documents d WHERE d.status = 'ERROR';
+
+CREATE OR REPLACE FUNCTION add_book(title text, authors integer[])
+RETURNS integer
+AS $$
+DECLARE
+    book_id integer;
+    id integer;
+    seq_num integer := 1;
+BEGIN
+    INSERT INTO books(title)
+        VALUES(title)
+        RETURNING books.book_id INTO book_id;
+    FOREACH id IN ARRAY authors LOOP
+        INSERT INTO authorship(book_id, author_id, seq_num)
+            VALUES (book_id, id, seq_num);
+        seq_num := seq_num + 1;
+    END LOOP;
+    RETURN book_id;
+EXCEPTION
+    WHEN unique_violation THEN
+        RAISE EXCEPTION 'Один и тот же автор не может быть указан дважды';
+END;
+$$ VOLATILE LANGUAGE plpgsql;
+
+CREATE DATABASE plpgsql_exceptions;
+\c plpgsql_exceptions
+DO $$
+BEGIN
+    BEGIN
+        RAISE NOTICE 'Операторы try';
+        --
+        RAISE NOTICE '...нет исключения';
+    EXCEPTION
+        WHEN no_data_found THEN
+            RAISE NOTICE 'Операторы catch';
+    END;
+    RAISE SQLSTATE 'ALLOK';
+EXCEPTION
+    WHEN others THEN
+        RAISE NOTICE 'Операторы finally';
+        IF SQLSTATE != 'ALLOK' THEN
+            RAISE;
+        END IF;
+END;
+$$;
+DO $$
+BEGIN
+    BEGIN
+        RAISE NOTICE 'Операторы try';
+        --
+        RAISE NOTICE '...исключение, которое обрабатывается';
+        RAISE no_data_found;
+    EXCEPTION
+        WHEN no_data_found THEN
+            RAISE NOTICE 'Операторы catch';
+    END;
+    RAISE SQLSTATE 'ALLOK';
+EXCEPTION
+    WHEN others THEN
+        RAISE NOTICE 'Операторы finally';
+        IF SQLSTATE != 'ALLOK' THEN
+            RAISE;
+        END IF;
+END;
+$$;
+DO $$
+BEGIN
+    BEGIN
+        RAISE NOTICE 'Операторы try';
+        --
+        RAISE NOTICE '...исключение, которое не обрабатывается';
+        RAISE division_by_zero;
+    EXCEPTION
+        WHEN no_data_found THEN
+            RAISE NOTICE 'Операторы catch';
+    END;
+    RAISE SQLSTATE 'ALLOK';
+EXCEPTION
+    WHEN others THEN
+        RAISE NOTICE 'Операторы finally';
+        IF SQLSTATE != 'ALLOK' THEN
+            RAISE;
+        END IF;
+END;
+$$;
+DO $$
+DECLARE
+    ctx text;
+BEGIN
+    RAISE division_by_zero;                       -- line 5
+EXCEPTION
+    WHEN others THEN
+        GET STACKED DIAGNOSTICS ctx = pg_exception_context;
+        RAISE NOTICE E'stacked =\n%', ctx;
+        GET CURRENT DIAGNOSTICS ctx = pg_context; -- line 10
+        RAISE NOTICE E'current =\n%', ctx;
+END;
+$$;
+CREATE FUNCTION getstack() RETURNS text[]
+AS $$
+DECLARE
+    ctx text;
+BEGIN
+    GET DIAGNOSTICS ctx = pg_context;
+    RETURN (regexp_split_to_array(ctx, E'\n'))[2:];
+END;
+$$ VOLATILE LANGUAGE plpgsql;
+CREATE FUNCTION foo() RETURNS integer
+AS $$
+BEGIN
+    RETURN bar();
+END;
+$$ VOLATILE LANGUAGE plpgsql;
+CREATE FUNCTION bar() RETURNS integer
+AS $$
+BEGIN
+    RETURN baz();
+END;
+$$ VOLATILE LANGUAGE plpgsql;
+CREATE FUNCTION baz() RETURNS integer
+AS $$
+BEGIN
+    RAISE NOTICE '%', getstack();
+    RETURN 0;
+END;
+$$ VOLATILE LANGUAGE plpgsql;
+SELECT foo();
+
+-- Триггеры
+CREATE OR REPLACE FUNCTION describe() RETURNS trigger
+AS $$
+DECLARE
+    rec record;
+    str text := '';
+BEGIN
+    IF TG_LEVEL = 'ROW' THEN
+        CASE TG_OP
+            WHEN 'DELETE' THEN rec := OLD; str := OLD::text;
+            WHEN 'UPDATE' THEN rec := NEW; str := OLD || ' -> ' || NEW;
+            WHEN 'INSERT' THEN rec := NEW; str := NEW::text;
+        END CASE;
+    END IF;
+    RAISE NOTICE '% % % %: %',
+        TG_TABLE_NAME, TG_WHEN, TG_OP, TG_LEVEL, str;
+    RETURN rec;
+END;
+$$ LANGUAGE plpgsql;
+DROP TABLE t;
+CREATE TABLE t(
+    id integer PRIMARY KEY,
+    s text
+);
+CREATE TRIGGER t_before_stmt
+BEFORE INSERT OR UPDATE OR DELETE -- события
+ON t                              -- таблица
+FOR EACH STATEMENT                -- уровень
+EXECUTE FUNCTION describe();      -- триггерная функция
+
+CREATE TRIGGER t_after_stmt
+AFTER INSERT OR UPDATE OR DELETE ON t
+FOR EACH STATEMENT EXECUTE FUNCTION describe();
+CREATE TRIGGER t_before_row
+BEFORE INSERT OR UPDATE OR DELETE ON t
+FOR EACH ROW EXECUTE FUNCTION describe();
+CREATE TRIGGER t_after_row
+AFTER INSERT OR UPDATE OR DELETE ON t
+FOR EACH ROW EXECUTE FUNCTION describe();
+INSERT INTO t VALUES (1,'aaa');
+UPDATE t SET s = 'bbb';
+UPDATE t SET s = 'ccc' where id = 0;
+
+INSERT INTO t VALUES (1,'ccc'), (3,'ddd')
+ON CONFLICT(id) DO UPDATE SET s = EXCLUDED.s;
+DELETE FROM t;
+
+CREATE OR REPLACE FUNCTION transition() RETURNS trigger
+AS $$
+DECLARE
+    rec record;
+BEGIN
+    IF TG_OP = 'DELETE' OR TG_OP = 'UPDATE' THEN
+        RAISE NOTICE 'Старое состояние:';
+        FOR rec IN SELECT * FROM old_table LOOP
+            RAISE NOTICE '%', rec;
+        END LOOP;
+    END IF;
+    IF TG_OP = 'UPDATE' OR TG_OP = 'INSERT' THEN
+        RAISE NOTICE 'Новое состояние:';
+        FOR rec IN SELECT * FROM new_table LOOP
+            RAISE NOTICE '%', rec;
+        END LOOP;
+    END IF;
+    RETURN NULL;
+END;
+$$ LANGUAGE plpgsql;
+CREATE TABLE trans(
+    id integer PRIMARY KEY,
+    n integer
+);
+INSERT INTO trans VALUES (1,10), (2,20), (3,30);
+CREATE TRIGGER t_after_upd_trans
+AFTER UPDATE ON trans -- только одно событие на один триггер
+REFERENCING
+    OLD TABLE AS old_table
+    NEW TABLE AS new_table -- можно и одну, не обязательно обе
+FOR EACH STATEMENT
+EXECUTE FUNCTION transition();
+UPDATE trans SET n = n + 1 WHERE n <= 20;
+
+CREATE TABLE coins(
+    face_value numeric,
+    name text
+);
+CREATE TABLE coins_history(LIKE coins);
+ALTER TABLE coins_history
+    ADD start_date timestamp,
+    ADD end_date timestamp;
+CREATE OR REPLACE FUNCTION history_insert() RETURNS trigger
+AS $$
+BEGIN
+    EXECUTE format(
+        'INSERT INTO %I SELECT ($1).*, current_timestamp, NULL',
+        TG_TABLE_NAME||'_history'
+    ) USING NEW;
+
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+CREATE OR REPLACE FUNCTION history_delete() RETURNS trigger
+AS $$
+BEGIN
+    EXECUTE format(
+        'UPDATE %I SET end_date = current_timestamp WHERE face_value = $1 AND end_date IS NULL',
+        TG_TABLE_NAME||'_history'
+    ) USING OLD.face_value;
+
+    RETURN OLD;
+END;
+$$ LANGUAGE plpgsql;
+ CREATE TRIGGER coins_history_insert
+AFTER INSERT OR UPDATE ON coins
+FOR EACH ROW EXECUTE FUNCTION history_insert();
+CREATE TRIGGER coins_history_delete
+AFTER UPDATE OR DELETE ON coins
+FOR EACH ROW EXECUTE FUNCTION history_delete();
+INSERT INTO coins VALUES (0.25, 'Полушка'), (3, 'Алтын');
+UPDATE coins SET name = '3 копейки' WHERE face_value = 3;
+INSERT INTO coins VALUES (5, '5 копеек');
+DELETE FROM coins WHERE face_value = 0.25;
+SELECT * FROM coins;
+SELECT * FROM coins_history ORDER BY face_value, start_date;
+\set d '2022-12-16 21:12:45.699279+03'
+SELECT face_value, name
+FROM coins_history
+WHERE start_date <= :'d' AND (end_date IS NULL OR :'d' < end_date)
+ORDER BY face_value;
+
+CREATE TABLE airports(
+    code char(3) PRIMARY KEY,
+    name text NOT NULL
+);
+CREATE TABLE flights(
+    id integer PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
+    airport_from char(3) NOT NULL REFERENCES airports(code),
+    airport_to   char(3) NOT NULL REFERENCES airports(code),
+    UNIQUE (airport_from, airport_to)
+);
+INSERT INTO airports VALUES
+    ('SVO', 'Москва. Шереметьево'),
+    ('LED', 'Санкт-Петербург. Пулково'),
+    ('TOF', 'Томск. Богашево');
+ INSERT INTO flights(airport_from, airport_to) VALUES
+    ('SVO','LED');
+CREATE VIEW flights_v AS
+SELECT id,
+       (SELECT name
+        FROM airports
+        WHERE code = airport_from) airport_from,
+       (SELECT name
+        FROM airports
+        WHERE code = airport_to) airport_to
+FROM flights;
+SELECT * FROM flights_v;
+UPDATE flights_v
+SET airport_to = 'Томск. Богашево'
+WHERE id = 2;
+
+CREATE OR REPLACE FUNCTION flights_v_update() RETURNS trigger
+AS $$
+DECLARE
+    code_to char(3);
+BEGIN
+    BEGIN
+        SELECT code INTO STRICT code_to
+        FROM airports
+        WHERE name = NEW.airport_to;
+    EXCEPTION
+        WHEN no_data_found THEN
+            RAISE EXCEPTION 'Аэропорт % отсутствует', NEW.airport_to;
+    END;
+    UPDATE flights
+    SET airport_to = code_to
+    WHERE id = OLD.id; -- изменение id игнорируем
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+CREATE TRIGGER flights_v_upd_trigger
+INSTEAD OF UPDATE ON flights_v
+FOR EACH ROW EXECUTE FUNCTION flights_v_update();
+UPDATE flights_v
+SET airport_to = 'Томск. Богашево'
+WHERE id = 2;
+SELECT * FROM flights_v;
+UPDATE flights_v
+SET airport_to = 'Южно-Сахалинск. Хомутово'
+WHERE id = 2;
+
+CREATE OR REPLACE FUNCTION describe_ddl() RETURNS event_trigger
+AS $$
+DECLARE
+    r record;
+BEGIN
+    -- Для события ddl_command_end контекст вызова в специальной функции
+    FOR r IN SELECT * FROM pg_event_trigger_ddl_commands()
+    LOOP
+        RAISE NOTICE '%. тип: %, OID: %, имя: % ',
+            r.command_tag, r.object_type, r.objid, r.object_identity;
+    END LOOP;
+    -- Функции триггера событий не нужно возвращать значение
+END;
+$$ LANGUAGE plpgsql;
+CREATE EVENT TRIGGER after_ddl
+ON ddl_command_end EXECUTE FUNCTION describe_ddl();
+CREATE TABLE t1(id integer PRIMARY KEY GENERATED ALWAYS AS IDENTITY);
+
+-- Практика
+CREATE OR REPLACE FUNCTION update_catalog() RETURNS trigger
+AS $$
+BEGIN
+    INSERT INTO operations(book_id, qty_change) VALUES
+        (OLD.book_id, NEW.onhand_qty - coalesce(OLD.onhand_qty,0));
+    RETURN NEW;
+END;
+$$ VOLATILE LANGUAGE plpgsql;
+CREATE TRIGGER update_catalog_trigger
+INSTEAD OF UPDATE ON catalog_v
+FOR EACH ROW
+EXECUTE FUNCTION update_catalog();
+ALTER TABLE books ADD COLUMN onhand_qty integer;
+CREATE OR REPLACE FUNCTION update_onhand_qty() RETURNS trigger
+AS $$
+BEGIN
+    UPDATE books
+    SET onhand_qty = onhand_qty + NEW.qty_change
+    WHERE book_id = NEW.book_id;
+    RETURN NULL;
+END;
+$$ VOLATILE LANGUAGE plpgsql;
+BEGIN;
+LOCK TABLE operations;
+UPDATE books b
+SET onhand_qty = (
+    SELECT coalesce(sum(qty_change),0)
+    FROM operations o
+    WHERE o.book_id = b.book_id
+);
+ALTER TABLE books ALTER COLUMN onhand_qty SET DEFAULT 0;
+ALTER TABLE books ALTER COLUMN onhand_qty SET NOT NULL;
+ALTER TABLE books ADD CHECK(onhand_qty >= 0);
+
+CREATE TRIGGER update_onhand_qty_trigger
+AFTER INSERT ON operations
+FOR EACH ROW
+EXECUTE FUNCTION update_onhand_qty();
+COMMIT;
+
+\d+ catalog_v
+
+CREATE OR REPLACE VIEW catalog_v AS
 SELECT b.book_id,
-       b.title AS display_name
-FROM   books b;
-CREATE VIEW operations_v AS
-SELECT book_id,
-       CASE
-           WHEN qty_change > 0 THEN 'Поступление'
-           ELSE 'Покупка'
-       END op_type,
-       abs(qty_change) qty_change,
-       to_char(date_created, 'DD.MM.YYYY') date_created
-FROM   operations
-ORDER BY operation_id;
+       b.title,
+       b.onhand_qty,
+       book_name(b.book_id, b.title) AS display_name,
+       b.authors
+FROM   books b
+ORDER BY display_name;
 
+SELECT * FROM catalog_v WHERE book_id = 1 \gx

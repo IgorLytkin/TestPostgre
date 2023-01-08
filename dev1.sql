@@ -993,6 +993,106 @@ SELECT b.book_id,
        b.onhand_qty
 FROM   books b
 ORDER BY display_name;
+CREATE OR REPLACE FUNCTION authors(book books) RETURNS text
+AS $$
+    SELECT string_agg(
+               a.last_name ||
+               ' ' ||
+               a.first_name ||
+               coalesce(' ' || nullif(a.middle_name,''), ''),
+               ', '
+               ORDER BY ash.seq_num
+           )
+    FROM   authors a
+           JOIN authorship ash ON a.author_id = ash.author_id
+    WHERE  ash.book_id = book.book_id;
+$$ STABLE LANGUAGE sql;
+DROP VIEW catalog_v;
+CREATE VIEW catalog_v AS
+SELECT b.book_id,
+       b.title,
+       b.onhand_qty,
+       book_name(b.book_id, b.title) AS display_name,
+       b.authors
+FROM   books b
+ORDER BY display_name;
+CREATE OR REPLACE FUNCTION get_catalog(
+    author_name text,
+    book_title text,
+    in_stock boolean
+)
+RETURNS TABLE(book_id integer, display_name text, onhand_qty integer)
+AS $$
+    SELECT cv.book_id,
+           cv.display_name,
+           cv.onhand_qty
+    FROM   catalog_v cv
+    WHERE  cv.title   ILIKE '%'||coalesce(book_title,'')||'%'
+    AND    cv.authors ILIKE '%'||coalesce(author_name,'')||'%'
+    AND    (in_stock AND cv.onhand_qty > 0 OR in_stock IS NOT TRUE)
+    ORDER BY display_name;
+$$ STABLE LANGUAGE sql;
+
+CREATE FUNCTION digit(d text) RETURNS integer
+AS $$
+SELECT ascii(d) - CASE
+        WHEN d BETWEEN '0' AND '9' THEN ascii('0')
+        ELSE ascii('A') - 10
+    END;
+$$ IMMUTABLE LANGUAGE sql;
+CREATE FUNCTION convert(hex text) RETURNS integer
+AS $$
+WITH s(d,ord) AS (
+    SELECT *
+    FROM regexp_split_to_table(reverse(upper(hex)),'') WITH ORDINALITY
+)
+SELECT sum(digit(d) * 16^(ord-1))::integer
+FROM s;
+$$ IMMUTABLE LANGUAGE sql;
+SELECT convert('0FE'), convert('0FF'), convert('100');
+
+DROP FUNCTION convert(text);
+CREATE FUNCTION convert(num text, radix integer DEFAULT 16)
+RETURNS integer
+AS $$
+WITH s(d,ord) AS (
+    SELECT *
+    FROM regexp_split_to_table(reverse(upper(num)),'') WITH ORDINALITY
+)
+SELECT sum(digit(d) * radix^(ord-1))::integer
+FROM s;
+$$ IMMUTABLE LANGUAGE sql;
+SELECT convert('0110',2), convert('0FF'), convert('Z',36);
+
+CREATE FUNCTION text2num(s text) RETURNS integer
+AS $$
+WITH s(d,ord) AS (
+    SELECT *
+    FROM regexp_split_to_table(reverse(s),'') WITH ORDINALITY
+)
+SELECT sum( (ascii(d)-ascii('A')) * 26^(ord-1))::integer
+FROM s;
+$$ IMMUTABLE LANGUAGE sql;
+CREATE FUNCTION num2text(n integer, digits integer) RETURNS text
+AS $$
+WITH RECURSIVE r(num,txt, level) AS (
+    SELECT n/26, chr( n%26 + ascii('A') )::text, 1
+    UNION ALL
+    SELECT r.num/26, chr( r.num%26 + ascii('A') ) || r.txt, r.level+1
+    FROM r
+    WHERE r.level < digits
+)
+SELECT r.txt FROM r WHERE r.level = digits;
+$$ IMMUTABLE LANGUAGE sql;
+SELECT num2text( text2num('ABC'), length('ABC') );
+
+CREATE FUNCTION generate_series(start text, stop text)
+RETURNS SETOF text
+AS $$
+    SELECT num2text( g.n, length(start) )
+    FROM generate_series(text2num(start), text2num(stop)) g(n);
+$$ IMMUTABLE LANGUAGE sql;
+SELECT generate_series('AZ','BC');
 
 -- 14. Динамический SQL
 DO $$

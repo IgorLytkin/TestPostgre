@@ -2508,3 +2508,137 @@ FROM   books b
 ORDER BY display_name;
 
 SELECT * FROM catalog_v WHERE book_id = 1 \gx
+DROP FUNCTION onhand_qty(books);
+SELECT * FROM catalog_v WHERE book_id = 1 \gx
+INSERT INTO operations(book_id, qty_change) VALUES (1,+10);
+SELECT * FROM catalog_v WHERE book_id = 1 \gx
+INSERT INTO operations(book_id, qty_change) VALUES (1,-100);
+
+CREATE DATABASE plpgsql_triggers;
+\c plpgsql_triggers
+CREATE TABLE t(
+    id integer PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
+    s text,
+    version integer
+);
+CREATE OR REPLACE FUNCTION inc_version() RETURNS trigger
+AS $$
+BEGIN
+    IF TG_OP = 'INSERT' THEN
+        NEW.version := 1;
+    ELSE
+        NEW.version := OLD.version + 1;
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+CREATE TRIGGER t_inc_version
+BEFORE INSERT OR UPDATE ON t
+FOR EACH ROW EXECUTE FUNCTION inc_version();
+INSERT INTO t(s) VALUES ('Раз');
+INSERT INTO t(s,version) VALUES ('Два',42);
+UPDATE t SET s = lower(s) WHERE id = 1;
+UPDATE t SET s = lower(s), version = 42 WHERE id = 2;
+CREATE TABLE orders (
+    id integer PRIMARY KEY,
+    total_amount numeric(20,2) NOT NULL DEFAULT 0
+);
+CREATE TABLE lines (
+   id integer PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
+   order_id integer NOT NULL REFERENCES orders(id),
+   amount numeric(20,2) NOT NULL
+);
+CREATE FUNCTION total_amount_ins() RETURNS trigger
+AS $$
+BEGIN
+    WITH l(order_id, total_amount) AS (
+        SELECT order_id, sum(amount)
+        FROM new_table
+        GROUP BY order_id
+    )
+    UPDATE orders o
+    SET total_amount = o.total_amount + l.total_amount
+    FROM l
+    WHERE o.id = l.order_id;
+    RETURN NULL;
+END;
+$$ LANGUAGE plpgsql;
+CREATE TRIGGER lines_total_amount_ins
+AFTER INSERT ON lines
+REFERENCING
+    NEW TABLE AS new_table
+FOR EACH STATEMENT
+EXECUTE FUNCTION total_amount_ins();
+CREATE FUNCTION total_amount_upd() RETURNS trigger
+AS $$
+BEGIN
+    WITH l_tmp(order_id, amount) AS (
+        SELECT order_id, amount FROM new_table
+        UNION ALL
+        SELECT order_id, -amount FROM old_table
+    ), l(order_id, total_amount) AS (
+        SELECT order_id, sum(amount)
+        FROM l_tmp
+        GROUP BY order_id
+        HAVING sum(amount) <> 0
+    )
+    UPDATE orders o
+    SET total_amount = o.total_amount + l.total_amount
+    FROM l
+    WHERE o.id = l.order_id;
+    RETURN NULL;
+END;
+$$ LANGUAGE plpgsql;
+CREATE TRIGGER lines_total_amount_upd
+AFTER UPDATE ON lines
+REFERENCING
+    OLD TABLE AS old_table
+    NEW TABLE AS new_table
+FOR EACH STATEMENT
+EXECUTE FUNCTION total_amount_upd();
+CREATE FUNCTION total_amount_del() RETURNS trigger
+AS $$
+BEGIN
+    WITH l(order_id, total_amount) AS (
+        SELECT order_id, -sum(amount)
+        FROM old_table
+        GROUP BY order_id
+    )
+    UPDATE orders o
+    SET total_amount = o.total_amount + l.total_amount
+    FROM l
+    WHERE o.id = l.order_id;
+    RETURN NULL;
+END;
+$$ LANGUAGE plpgsql;
+CREATE TRIGGER lines_total_amount_del
+AFTER DELETE ON lines
+REFERENCING
+    OLD TABLE AS old_table
+FOR EACH STATEMENT
+EXECUTE FUNCTION total_amount_del();
+CREATE FUNCTION total_amount_truncate() RETURNS trigger
+AS $$
+BEGIN
+    UPDATE orders SET total_amount = 0;
+    RETURN NULL;
+END;
+$$ LANGUAGE plpgsql;
+CREATE TRIGGER lines_total_amount_truncate
+AFTER TRUNCATE ON lines
+FOR EACH STATEMENT
+EXECUTE FUNCTION total_amount_truncate();
+
+INSERT INTO orders VALUES (1), (2);
+SELECT * FROM orders ORDER BY id;
+INSERT INTO lines (order_id, amount) VALUES
+    (1,100), (1,100), (2,500), (2,500);
+SELECT * FROM lines;
+SELECT * FROM orders ORDER BY id;
+UPDATE lines SET amount = amount * 2;
+SELECT * FROM orders ORDER BY id;
+DELETE FROM lines WHERE id = 1;
+SELECT * FROM orders ORDER BY id;
+TRUNCATE lines;
+SELECT * FROM orders ORDER BY id;
+
